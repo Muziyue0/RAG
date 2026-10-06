@@ -1,0 +1,21 @@
+# Data processing and local embedding inference
+pandas
+torch==2.6.0
+sentence-transformers==3.4.1
+transformers==4.48.3
+huggingface-hub==0.27.1
+
+# LangChain stack used by the notebook
+langchain==0.3.27
+langchain-core==0.3.72
+langchain-community==0.3.27
+langchain-openai==0.3.28
+langchain-huggingface==0.1.2
+langchain-pinecone==0.2.13
+
+# RAG evaluation
+ragas==0.2.15
+
+python-dotenv
+fastapi
+uvicorn[standard]
