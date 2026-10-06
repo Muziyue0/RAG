@@ -29,14 +29,17 @@ class RAGService:
             index_name=settings.PINECONE_INDEX_NAME, embedding=self.embeddings
         )
         self.base_retriever = self.vector_store.as_retriever(
-            search_type="similarity", search_kwargs={"k": 20}
+            search_type="similarity", search_kwargs={"k": settings.RETRIEVAL_K}
         )
 
-        # 3. Cross-Encoder 重排器
+        # 先扩大相似度候选集，再用多语言 Cross-Encoder 精排，避免只保留
+        # 少量局部片段导致章节类问题的上下文不完整。
         self.cross_encoder = HuggingFaceCrossEncoder(
-            model_name="BAAI/bge-reranker-base"
+            model_name=settings.RERANK_MODEL
         )
-        self.reranker = CrossEncoderReranker(model=self.cross_encoder, top_n=5)
+        self.reranker = CrossEncoderReranker(
+            model=self.cross_encoder, top_n=settings.RERANK_TOP_N
+        )
         self.compression_retriever = ContextualCompressionRetriever(
             base_compressor=self.reranker, base_retriever=self.base_retriever
         )
@@ -73,6 +76,7 @@ class RAGService:
             rewritten_query = query_rewriter.invoke(
                 {"chat_history": history_slice, "question": chain_input["question"]}
             ).strip()
+            # 向量库和文档均为英文，使用英文改写结果进行召回和排序。
             return self.compression_retriever.invoke(rewritten_query)
 
         # 生成回答 Prompt

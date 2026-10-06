@@ -19,6 +19,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制业务代码
 COPY app/ ./app
 
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /workspace
+
+USER appuser
+
 # 暴露 FastAPI 端口
 EXPOSE 8000
 

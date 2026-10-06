@@ -1,9 +1,13 @@
+import logging
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from app.schemas import ChatRequest, ChatResponse
 from app.rag_service import rag_service
+from app.config import settings
 
 
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Domain Manual RAG Service",
@@ -15,6 +19,13 @@ app = FastAPI(
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+
+@app.get("/ready")
+def readiness_check():
+    if rag_service is None:
+        raise HTTPException(status_code=503, detail="服务尚未就绪")
+    return {"status": "ready"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -54,6 +65,17 @@ def chat_page():
                 opacity: .72; }
         .content p { margin: 0 0 8px; }
         .content p:last-child { margin-bottom: 0; }
+        .content h1, .content h2, .content h3, .content h4, .content h5, .content h6 {
+          margin: 14px 0 8px; color: #0f766e; line-height: 1.35;
+        }
+        .content h1 { font-size: 1.45em; }
+        .content h2 { font-size: 1.3em; }
+        .content h3 { font-size: 1.18em; }
+        .content hr { margin: 14px 0; border: 0; border-top: 1px solid #cbd5e1; }
+        .content table { width: 100%; margin: 10px 0; border-collapse: collapse; font-size: .95em; }
+        .content th, .content td { padding: 8px 10px; border: 1px solid #cbd5e1;
+                                   text-align: left; vertical-align: top; }
+        .content th { color: #0f766e; background: #ecfeff; font-weight: 750; }
         .content strong { color: #0f766e; font-weight: 750; }
         .user .content strong { color: #fff; }
         .content ul { margin: 5px 0 8px; padding-left: 22px; }
@@ -119,21 +141,48 @@ def chat_page():
           const inline = (line) => line
             .replace(/\\*\\*(.+?)\\*\\*/g, "<strong>$1</strong>")
             .replace(/`([^`]+)`/g, "<code>$1</code>");
+          const tableCells = (line) => line.trim().replace(/^\\||\\|$/g, "").split("|")
+            .map((cell) => inline(cell.trim()));
+          const isTableSeparator = (line) => /^\\s*\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)+\\|?\\s*$/.test(line);
+          const renderTable = (header, rows) => {
+            const head = tableCells(header).map((cell) => `<th>${cell}</th>`).join("");
+            const body = rows.map((row) => {
+              const cells = tableCells(row).map((cell) => `<td>${cell}</td>`).join("");
+              return `<tr>${cells}</tr>`;
+            }).join("");
+            return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+          };
 
-          lines.forEach((line) => {
+          for (let index = 0; index < lines.length; index += 1) {
+            const line = lines[index];
             const listMatch = line.match(/^\\s*[-*]\\s+(.+)/);
-            if (listMatch) {
-              listItems.push(`<li>${inline(listMatch[1])}</li>`);
-            } else if (/^###\\s+/.test(line)) {
+            if (line.includes("|") && isTableSeparator(lines[index + 1] || "")) {
               flushList();
-              output.push(`<p><strong>${inline(line.replace(/^###\\s+/, ""))}</strong></p>`);
+              const rows = [];
+              index += 2;
+              while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+                rows.push(lines[index]);
+                index += 1;
+              }
+              output.push(renderTable(line, rows));
+              index -= 1;
+            } else if (listMatch) {
+              listItems.push(`<li>${inline(listMatch[1])}</li>`);
+            } else if (/^#{1,6}\\s+/.test(line)) {
+              flushList();
+              const heading = line.match(/^(#{1,6})\\s+(.+)/);
+              const level = heading[1].length;
+              output.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+            } else if (/^\\s*((\\*\\s*){3,}|(-\\s*){3,}|(_\\s*){3,})$/.test(line)) {
+              flushList();
+              output.push("<hr>");
             } else if (line.trim()) {
               flushList();
               output.push(`<p>${inline(line)}</p>`);
             } else {
               flushList();
             }
-          });
+          }
           flushList();
           return output.join("");
         }
@@ -186,10 +235,23 @@ def chat_page():
 
 @app.post("/api/v1/chat", response_model=ChatResponse)
 def chat_endpoint(request: ChatRequest):
+    if len(request.question.strip()) > settings.MAX_QUESTION_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"问题长度不能超过 {settings.MAX_QUESTION_LENGTH} 个字符。",
+        )
+    if len(request.session_id) > settings.MAX_SESSION_ID_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"会话标识长度不能超过 {settings.MAX_SESSION_ID_LENGTH} 个字符。",
+        )
     try:
         answer = rag_service.execute_query(
             question=request.question, session_id=request.session_id
         )
         return ChatResponse(session_id=request.session_id, answer=answer)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Chat request failed")
+        raise HTTPException(
+            status_code=500, detail="服务暂时不可用，请稍后重试。"
+        )
