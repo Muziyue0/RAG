@@ -1,7 +1,11 @@
+import json
+import logging
 from collections import OrderedDict
-from typing import Dict
+from typing import Dict, Sequence
+import redis
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.messages import BaseMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
@@ -15,9 +19,48 @@ from langchain_openai import ChatOpenAI
 from app.config import settings
 
 
+logger = logging.getLogger(__name__)
+
+
+class RedisChatMessageHistory(BaseChatMessageHistory):
+    def __init__(self, client: redis.Redis, key: str):
+        self.client = client
+        self.key = key
+
+    @property
+    def messages(self) -> list[BaseMessage]:
+        try:
+            payloads = self.client.lrange(self.key, 0, -1)
+            return messages_from_dict([json.loads(payload) for payload in payloads])
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            logger.exception("Invalid Redis session history key=%s", self.key)
+            raise RuntimeError("Redis session history is corrupted") from error
+
+    def add_messages(self, messages: Sequence[BaseMessage]) -> None:
+        if not messages:
+            return
+        serialized = [
+            json.dumps(message, separators=(",", ":"))
+            for message in messages_to_dict(list(messages))
+        ]
+        with self.client.pipeline(transaction=True) as pipeline:
+            pipeline.rpush(self.key, *serialized)
+            pipeline.ltrim(self.key, -settings.MAX_HISTORY_MESSAGES, -1)
+            pipeline.expire(self.key, settings.SESSION_TTL_SECONDS)
+            pipeline.execute()
+
+    def clear(self) -> None:
+        self.client.delete(self.key)
+
+
 class RAGService:
     def __init__(self):
         self.message_store: Dict[str, ChatMessageHistory] = OrderedDict()
+        self.redis_client: redis.Redis | None = None
+        if settings.REDIS_URL:
+            self.redis_client = redis.from_url(
+                settings.REDIS_URL, decode_responses=True
+            )
         self._init_models()
         self._build_pipeline()
 
@@ -56,6 +99,10 @@ class RAGService:
         )
 
     def _get_session_history(self, session_id: str) -> BaseChatMessageHistory:
+        if self.redis_client is not None:
+            return RedisChatMessageHistory(
+                self.redis_client, f"rag:session:{session_id}"
+            )
         if session_id not in self.message_store:
             self.message_store[session_id] = ChatMessageHistory()
         self.message_store.move_to_end(session_id)

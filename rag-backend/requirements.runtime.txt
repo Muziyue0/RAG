@@ -1,0 +1,16 @@
+# Runtime dependencies for the FastAPI RAG service.
+sentence-transformers==3.4.1
+transformers==4.48.3
+huggingface-hub==0.27.1
+
+langchain==0.3.27
+langchain-core==0.3.72
+langchain-community==0.3.27
+langchain-openai==0.3.28
+langchain-huggingface==0.1.2
+langchain-pinecone==0.2.13
+
+python-dotenv==1.2.4
+redis==6.4.0
+fastapi==0.143.0
+uvicorn[standard]==0.54.0

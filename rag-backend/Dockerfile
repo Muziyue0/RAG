@@ -16,8 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 先复制依赖列表并安装（利用 Docker 缓存层）
-COPY requirements.txt .
-RUN pip install --no-cache-dir --default-timeout=180 --retries 5 -r requirements.txt \
+COPY requirements.runtime.txt .
+RUN pip install --no-cache-dir --no-compile --default-timeout=180 --retries 5 \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.6.0 \
+    && pip install --no-cache-dir --no-compile --default-timeout=180 --retries 5 \
+        -r requirements.runtime.txt \
+    && pip check \
     && apt-get purge -y --auto-remove build-essential \
     && rm -rf /var/lib/apt/lists/*
 
