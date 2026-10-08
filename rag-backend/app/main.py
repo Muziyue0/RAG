@@ -1,7 +1,13 @@
 import logging
+import time
+from collections import defaultdict, deque
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
 from app.schemas import ChatRequest, ChatResponse
 from app.rag_service import rag_service
 from app.config import settings
@@ -14,6 +20,63 @@ app = FastAPI(
     description="基于重排与滑动窗口记忆的高精度检索后端服务",
     version="1.0.0",
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Request-ID"],
+)
+
+
+class RequestProtectionMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app):
+        super().__init__(app)
+        self.requests_by_client = defaultdict(deque)
+
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID") or str(uuid4())
+        request.state.request_id = request_id
+        started_at = time.perf_counter()
+
+        if request.url.path == "/api/v1/chat":
+            now = time.monotonic()
+            client_id = request.client.host if request.client else "unknown"
+            requests = self.requests_by_client[client_id]
+            while requests and now - requests[0] >= settings.RATE_LIMIT_WINDOW_SECONDS:
+                requests.popleft()
+            if len(requests) >= settings.RATE_LIMIT_REQUESTS:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "请求过于频繁，请稍后重试。"},
+                    headers={"Retry-After": str(settings.RATE_LIMIT_WINDOW_SECONDS)},
+                )
+            requests.append(now)
+
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("Unhandled request error request_id=%s", request_id)
+            raise
+
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        logger.info(
+            "request_id=%s method=%s path=%s status=%s duration_ms=%.1f",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_ms,
+        )
+        return response
+
+
+app.add_middleware(RequestProtectionMiddleware)
 
 
 @app.get("/health")

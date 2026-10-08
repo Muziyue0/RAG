@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from typing import Dict
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
@@ -16,7 +17,7 @@ from app.config import settings
 
 class RAGService:
     def __init__(self):
-        self.message_store: Dict[str, ChatMessageHistory] = {}
+        self.message_store: Dict[str, ChatMessageHistory] = OrderedDict()
         self._init_models()
         self._build_pipeline()
 
@@ -50,11 +51,16 @@ class RAGService:
             openai_api_key=settings.DEEPSEEK_API_KEY,
             openai_api_base="https://api.deepseek.com",
             temperature=0.0,
+            request_timeout=settings.LLM_TIMEOUT_SECONDS,
+            max_retries=settings.LLM_MAX_RETRIES,
         )
 
     def _get_session_history(self, session_id: str) -> BaseChatMessageHistory:
         if session_id not in self.message_store:
             self.message_store[session_id] = ChatMessageHistory()
+        self.message_store.move_to_end(session_id)
+        while len(self.message_store) > settings.MAX_SESSIONS:
+            self.message_store.popitem(last=False)
         return self.message_store[session_id]
 
     def _build_pipeline(self):
@@ -111,9 +117,13 @@ class RAGService:
         )
 
     def execute_query(self, question: str, session_id: str) -> str:
-        return self.pipeline.invoke(
+        answer = self.pipeline.invoke(
             {"question": question}, config={"configurable": {"session_id": session_id}}
         )
+        history = self.message_store.get(session_id)
+        if history is not None:
+            history.messages = history.messages[-settings.MAX_HISTORY_MESSAGES :]
+        return answer
 
 
 rag_service = RAGService()
